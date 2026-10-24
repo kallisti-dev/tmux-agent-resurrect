@@ -227,9 +227,9 @@ pane_session() { pane_option "$1" @agent-resurrect-session; }
 
 # Usage: record_session PANE AGENT ID [DIRECTORY [LAUNCH]]
 # Record that PANE runs AGENT's session ID, in DIRECTORY if given, replacing
-# any pending resume. LAUNCH, if given, is the JSON object that save adds to
-# the session's record, describing how the agent runs. Both are set first, so
-# a reader that sees the session also sees them.
+# any pending resume. LAUNCH, if given, is the JSON object, describing how the
+# agent runs, from which save builds the session's record. Both are set first,
+# so a reader that sees the session also sees them.
 record_session() {
   if [[ -n ${4:-} ]]; then
     tmux set-option -p -t "$1" @agent-resurrect-cwd "$4"

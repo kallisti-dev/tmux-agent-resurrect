@@ -53,10 +53,16 @@ directory for the Nix packages; OpenCode through `OPENCODE_CONFIG_CONTENT` and
 its configuration file. The tests do not cover authentication, session file
 compatibility across versions, or an actual conversation resumption.
 
-The transcript directory layout and top-level `cwd` and `permissionMode` fields
-are an integration assumption and can change with Claude versions, as can the
+The transcript directory layout, the top-level `cwd`, `permissionMode`,
+`requestedModel`, `effort`, and `attributionSkill` fields, and the entries that
+record typed commands, ultracode, model fallbacks, and the end of a turn are an
+integration assumption and can change with Claude versions, as can the
 command-line options that the resume command repeats, which are Claude Code
 2.1.300's. An option a later version adds ends the options that are repeated.
+Save tells a skill's own model or effort level from the session's by the
+responses alone. If either changes other than by a typed `/model` or `/effort`,
+such as from the model picker during a turn, just before a stretch of responses
+in a skill, the session resumes with the earlier one.
 Worktree inference covers the standard `.claude/worktrees/<name>` layout; it
 does not recreate deleted trees or preserve a subdirectory within a named
 worktree at launch.

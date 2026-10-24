@@ -13,6 +13,68 @@ records=$(mktemp "${snapshot}.agent-resurrect-records.XXXXXX")
 running_panes=$(mktemp "${snapshot}.agent-resurrect-running.XXXXXX")
 output=$(mktemp "${snapshot}.agent-resurrect-save.XXXXXX")
 trap 'rm -f -- "$records" "$running_panes" "$output"' EXIT
+harness_resume=$(tmux show-options -gqv @agent-resurrect-harness-resume)
+
+# Usage: read_transcript TRANSCRIPT
+# Print as JSON what save takes from a Claude transcript: the latest valid
+# absolute cwd, the latest permission mode, and the model and effort level
+# that the session last used, as each response records them. A skill can set
+# its own model or effort level for the rest of its turn, which /model and
+# /effort don't override, so the responses since the latest one outside a
+# skill don't count when they all have one value that differs from that
+# one's, unless a typed /model or /effort may have chosen it. Responses after
+# a fallback to another model don't count until the turn ends. Ultracode is on
+# from an enter attachment until an exit one. JSON decoding handles spaces,
+# escaping and pretty/partially written lines.
+read_transcript() {
+  jq -cRn '
+    def level: if type == "string" and test("^[a-z]+\\z") then . else null end;
+    def word: if type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:/@,+=\\[\\]-]*\\z")
+      then . else null end;
+    def get($key): if type == "object" then .[$key] else null end;
+    def typed($command): [(.message | get("content")), .content | strings |
+      select(startswith("<command-name>/\($command)</command-name>"))] | length > 0;
+    def restored($setting):
+      (.skill[$setting] // []) as $values |
+      if ($values | length) == 1 and .outside[$setting] != null and
+        $values[0] != .outside[$setting] and (.chosen[$setting] | not)
+      then .outside[$setting] else .latest[$setting] end;
+    reduce inputs as $line ({};
+      (try ($line | fromjson) catch null) as $entry |
+      if ($entry | type) != "object" then .
+      else
+        (if ($entry.cwd | type) == "string" and ($entry.cwd | startswith("/"))
+          then .cwd = $entry.cwd else . end) |
+        (if ($entry.permissionMode | type) == "string"
+          then .mode = $entry.permissionMode else . end) |
+        # Claude records an API error as a response of its own.
+        if $entry.type == "assistant" and ($entry.message | get("model")) != "<synthetic>" and
+          (.fallback | not)
+        then
+          ({effort: ($entry.effort | level), model: ($entry.requestedModel | word)} |
+            with_entries(select(.value != null))) as $used |
+          .latest += $used |
+          if $entry.attributionSkill then
+            .skill.effort = ((.skill.effort // []) + [$used.effort | values] | unique) |
+            .skill.model = ((.skill.model // []) + [$used.model | values] | unique)
+          else
+            .outside += $used | .skill = {} | .chosen = {}
+          end
+        elif $entry.type == "attachment" and ($entry.attachment | get("type")) == "ultra_effort_enter" then
+          .ultracode = true
+        elif $entry.type == "attachment" and ($entry.attachment | get("type")) == "ultra_effort_exit" then
+          .ultracode = false
+        elif $entry.type == "system" and $entry.subtype == "model_fallback" then .fallback = true
+        elif $entry.type == "system" and $entry.subtype == "turn_duration" then .fallback = false
+        # The model picker sets the effort level too.
+        elif $entry | typed("model") then .chosen = {model: true, effort: true}
+        elif $entry | typed("effort") then .chosen.effort = true
+        else . end
+      end) |
+    {cwd, mode, model: restored("model"),
+      effort: (if .ultracode then "ultracode" else restored("effort") end)}
+  ' "$1"
+}
 
 # Use snapshot pane identities rather than whitespace-delimited list-panes.
 # This also respects resurrect's decision to omit grouped sessions. Each line
@@ -57,30 +119,31 @@ while IFS=$'\t' read -r command full row; do
   launch=$(pane_option "$pane" @agent-resurrect-launch)
   jq -e 'type == "object"' >/dev/null 2>&1 <<<"$launch" || launch='{}'
   if [[ $agent == claude ]]; then
+    # The model and effort level Claude was started with.
+    model=$(jq -r '.model | strings' <<<"$launch")
+    effort=$(jq -r '.effort | strings' <<<"$launch")
     if transcript=$(find_transcript "$id" "$(claude_projects_dir "$launch")"); then
-      # The latest valid absolute cwd, and the latest permission mode. JSON
-      # decoding handles spaces, escaping and pretty/partially written lines.
-      latest=$(jq -cRn '
-        reduce inputs as $line ({};
-          (try ($line | fromjson) catch null) as $entry |
-          if ($entry | type) != "object" then .
-          else
-            (if ($entry.cwd | type) == "string" and ($entry.cwd | startswith("/"))
-              then .cwd = $entry.cwd else . end) |
-            (if ($entry.permissionMode | type) == "string"
-              then .mode = $entry.permissionMode else . end)
-          end)
-      ' "$transcript")
-      last_cwd=$(jq -r '.cwd // empty' <<<"$latest")
+      used=$(read_transcript "$transcript")
+      last_cwd=$(jq -r '.cwd // empty' <<<"$used")
       [[ -z $last_cwd ]] || dir=$last_cwd
       # Resuming restores the permission mode, except bypassing permissions,
-      # which needs the option again.
-      if [[ $(jq -r '.mode // empty' <<<"$latest") == bypassPermissions ]]; then
-        launch=$(jq -c '.options = ((.options // []) + ["--dangerously-skip-permissions"])' <<<"$launch")
+      # but not the model or effort level, and Claude's settings can't keep
+      # max effort as the default.
+      if [[ $harness_resume != on ]]; then
+        if [[ $(jq -r '.mode // empty' <<<"$used") == bypassPermissions ]]; then
+          launch=$(jq -c '.options = ((.options // []) + ["--dangerously-skip-permissions"])' <<<"$launch")
+        fi
+        model=$(jq -r --arg model "$model" '.model // $model' <<<"$used")
+        effort=$(jq -r --arg effort "$effort" '.effort // $effort' <<<"$used")
       fi
     else
       warn "no unique transcript for $id; saving pane directory as fallback"
     fi
+    launch=$(jq -c --arg model "$model" --arg effort "$effort" '
+      del(.model, .effort) |
+      [if $model == "" then empty else "--model", $model end,
+        if $effort == "" then empty else "--effort", $effort end] as $set |
+      if $set == [] then . else .options = ((.options // []) + $set) end' <<<"$launch")
     worktree=$(worktree_name "$dir")
   fi
   record=$(jq -c --arg agent "$agent" --arg cwd "$dir" --arg id "$id" --arg worktree "$worktree" \

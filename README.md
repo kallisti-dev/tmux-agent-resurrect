@@ -291,13 +291,20 @@ in their transcript, falling back to the pane's directory if there is no usable
 transcript cwd.
 
 The command repeats the options Claude was started with that resuming does not
-restore, such as `--model`, `--effort`, `--add-dir`, `--mcp-config` and
-`--settings` files, and tool lists, but not the prompt. Claude restores the
+restore, such as `--add-dir`, `--mcp-config` and `--settings` files, and tool
+lists, but not the prompt. On macOS, the options are read from `ps`, which
+joins arguments with spaces, so options after a system prompt, or after another
+value with spaces that isn't an existing path, are not repeated.
+
+Resuming doesn't restore the model or effort level either, so a resumed session
+would get the default ones, and the default level can't be max. The command
+passes the model and effort level the session last used with `--model` and
+`--effort`, leaving out those a skill sets for its own turn, and
+`--effort ultracode` if ultracode was on. When the transcript doesn't record
+them, it repeats the ones Claude was started with. Claude restores the
 permission mode itself, except bypassing permissions, so the command adds
-`--dangerously-skip-permissions` if the session last bypassed them. On macOS,
-the options are read from `ps`, which joins arguments with spaces, so options
-after a system prompt, or after another value with spaces that isn't an
-existing path, are not repeated.
+`--dangerously-skip-permissions` if the session last bypassed them.
+[Harness resume](#harness-resume) turns these off.
 
 ### OpenCode
 
@@ -333,6 +340,18 @@ Each Claude session resumes with the `CLAUDE_CONFIG_DIR` it ran with, so panes
 can use different configuration directories. Use an absolute path; a session
 with a relative one resumes with the `CLAUDE_CONFIG_DIR` in tmux's global
 environment, where the save and restore callbacks run.
+
+### Harness resume
+
+By default, a Claude session resumes with the model, effort level, ultracode,
+and permission bypass it last used, which `--resume` doesn't restore. To resume
+sessions as Claude does, with only the options they were started with, set:
+
+```tmux
+set -g @agent-resurrect-harness-resume 'on'
+```
+
+The option applies to sessions saved after it is set.
 
 ## Documentation
 

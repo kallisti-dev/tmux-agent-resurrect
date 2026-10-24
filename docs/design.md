@@ -68,10 +68,12 @@ needs the same one, and the options a resume repeats. It reads the options from
 the command line of `CLAUDE_PID`, the Claude process:
 
 - It repeats those that configure the session and that `--resume` does not
-  restore, such as `--model`, `--settings`, and `--add-dir`. It leaves out
-  those that choose or create a session, apply only with `--print`, or set the
-  permission mode, which the resumed session restores. Save adds
-  `--dangerously-skip-permissions` from the transcript instead.
+  restore, such as `--settings` and `--add-dir`. It leaves out those that
+  choose or create a session, apply only with `--print`, or set the permission
+  mode, which the resumed session restores. Save adds
+  `--dangerously-skip-permissions` from the transcript instead. The values of
+  `--model` and `--effort` are kept apart from the options, since save prefers
+  later ones from the transcript.
 - Relative paths are resolved against the directory Claude started in. A
   `--settings` or `--mcp-config` value that isn't a file is JSON, which may
   hold secrets, so it is not repeated.
@@ -123,12 +125,32 @@ A pane that records a session gets a [snapshot record](#snapshot-records):
 
 - For Claude, the directory is the latest absolute `cwd` in the session's
   transcript, or the pane's directory if the transcript has none; a directory
-  under `REPO/.claude/worktrees/NAME` also sets the worktree. If the latest
-  permission mode in the transcript is `bypassPermissions`, the record's
-  options gain `--dangerously-skip-permissions`.
+  under `REPO/.claude/worktrees/NAME` also sets the worktree. The record's
+  options gain the session's settings, described below.
 - For OpenCode, the directory is the one the plugin reported. OpenCode may not
   report an end, so its session is saved only while the pane still runs
   OpenCode.
+
+`--resume` doesn't restore a Claude session's model or effort level, and
+Claude's settings can't keep max effort as the default. Unless
+`@agent-resurrect-harness-resume` is `on`, save adds the settings the session
+last used to the record's options, from its transcript:
+
+- `--dangerously-skip-permissions` if the latest permission mode is
+  `bypassPermissions`. Claude restores the other modes itself.
+- `--model` and `--effort` with the `requestedModel` and `effort` of the latest
+  response, or else the values Claude was started with. A skill can set its
+  own model or effort level for the rest of its turn, which `/model` and
+  `/effort` don't override, so the responses made in skills since the latest
+  response outside one don't count when they all have one value that differs
+  from that response's, unless a typed `/model` or `/effort` has come since.
+  Responses after a fallback to another model don't count until the turn ends.
+- `--effort ultracode` instead if ultracode was on: Claude adds an
+  `ultra_effort_enter` attachment while it is on and an `ultra_effort_exit` one
+  when it goes off.
+
+With the option `on`, the options gain only the model and effort level Claude
+was started with.
 
 A pane waiting for its resume, or whose resume was dispatched but whose
 harness hasn't reported a session yet, keeps its pending record, so a save
@@ -258,7 +280,7 @@ object:
 | `cwd` | The absolute directory the session resumes in |
 | `worktree` | The Claude worktree name, otherwise empty |
 | `config_dir` | Claude only: the session's `CLAUDE_CONFIG_DIR`, empty if it was unset |
-| `options` | Claude only: the arguments the resume command repeats |
+| `options` | Claude only: the options the resume command passes |
 
 For a record without `config_dir`, restore looks for the transcript under the
 tmux server's `CLAUDE_CONFIG_DIR`, and the resume command sets none.
@@ -279,7 +301,7 @@ snapshot directory private. The plugin has no network service or telemetry.
 | --- | --- | --- |
 | `@agent-resurrect-session` | Pane | The harness and session ID running in the pane, maintained by its plugin |
 | `@agent-resurrect-cwd` | Pane | The session's directory, from harnesses whose session files save does not read |
-| `@agent-resurrect-launch` | Pane | JSON that save adds to the session's record, such as Claude's `config_dir` and `options` |
+| `@agent-resurrect-launch` | Pane | JSON from which save builds the session's record, such as Claude's `config_dir`, `options`, `model`, and `effort` |
 | `@agent-resurrect-resume-data` | Pane | The record waiting for dispatch, or dispatched and not yet reported by the harness |
 | `@agent-resurrect-resume-cmd` | Pane | The resume command, kept for inspection |
 | `@agent-resurrect-launched` | Pane | A resume was typed into the pane |
@@ -289,6 +311,7 @@ snapshot directory private. The plugin has no network service or telemetry.
 | `@agent-resurrect-unrecorded` | Global | The Claude panes without a session at the last save that reported them |
 | `@agent-resurrect-mismatch` | Global | The plugin versions in the last mismatch reported at SessionStart |
 | `@agent-resurrect-dir`, `@agent-resurrect-version` | Global | The loaded plugin's directory and version |
+| `@agent-resurrect-harness-resume` | Global | Set by the user to `on` to resume sessions as the harness does |
 
 Setup also keeps its registrations in global options: `-previous-PHASE` and
 `-managed-PHASE` for each resurrect hook, and `-EVENT-slot` and

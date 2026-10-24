@@ -256,6 +256,32 @@ class Integration(unittest.TestCase):
         self.script("tmux-agent-resurrect-save", self.snapshot)
         self.hook("SessionEnd")
 
+    def claude_process(self, *args):
+        # A process with Claude's command line, which the hook finds through
+        # CLAUDE_PID.
+        fake = self.base / "fake claude/claude"
+        fake.parent.mkdir(exist_ok=True)
+        fake.write_text(f"#!{PYTHON}\nimport time\ntime.sleep(60)\n")
+        fake.chmod(0o755)
+        process = subprocess.Popen([str(fake), *args])
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        return process
+
+    def saved_options(self, *entries, process=None):
+        # The options save gives a session whose transcript ends with entries,
+        # started as process if given.
+        with self.transcript().open("a") as stream:
+            for entry in entries:
+                stream.write(json.dumps(entry) + "\n")
+        env = (
+            self.env if process is None else dict(self.env, CLAUDE_PID=str(process.pid))
+        )
+        self.hook("SessionStart", env=env)
+        self.write_snapshot()
+        self.script("tmux-agent-resurrect-save", self.snapshot)
+        return self.records()[0].get("options", [])
+
     def attach(self, session="work"):
         env = {k: v for k, v in self.env.items() if k not in {"TMUX", "TMUX_PANE"}}
         # Control-mode output, including %message lines, is kept for messages().
@@ -1526,46 +1552,31 @@ class Integration(unittest.TestCase):
         extra.mkdir()
         mcp = self.home / "mcp.json"
         mcp.write_text("{}")
-        # A process with Claude's command line, which the hook finds through
-        # CLAUDE_PID.
-        fake = self.base / "fake claude/claude"
-        fake.parent.mkdir()
-        fake.write_text(f"#!{PYTHON}\nimport time\ntime.sleep(60)\n")
-        fake.chmod(0o755)
-        process = subprocess.Popen(
-            [
-                str(fake),
-                "--model",
-                "claude-haiku-5-5",
-                "--add-dir",
-                str(extra),
-                "lib",
-                "--effort=low",
-                "--dangerously-skip-permissions",
-                "-c",
-                "--mcp-config",
-                str(mcp),
-                "--allowedTools",
-                "Bash(git log:*)",
-                "Edit",
-                "--strict-mcp-config",
-                "--append-system-prompt",
-                "be terse",
-                "--settings",
-                '{"model": "opus"}',
-                "explain --verbose",
-            ]
-        )
-        self.addCleanup(process.wait)
-        self.addCleanup(process.kill)
-        expected = [
+        process = self.claude_process(
             "--model",
             "claude-haiku-5-5",
             "--add-dir",
             str(extra),
+            "lib",
+            "--effort=low",
+            "--dangerously-skip-permissions",
+            "-c",
+            "--mcp-config",
+            str(mcp),
+            "--allowedTools",
+            "Bash(git log:*)",
+            "Edit",
+            "--strict-mcp-config",
+            "--append-system-prompt",
+            "be terse",
+            "--settings",
+            '{"model": "opus"}',
+            "explain --verbose",
+        )
+        expected = [
+            "--add-dir",
+            str(extra),
             f"{self.cwd}/lib",
-            "--effort",
-            "low",
             "--mcp-config",
             str(mcp),
             "--allowedTools",
@@ -1576,7 +1587,7 @@ class Integration(unittest.TestCase):
         # ps joins the arguments elsewhere, so the extent of text is unknown.
         if Path("/proc/self/cmdline").exists():
             expected += ["--append-system-prompt", "be terse"]
-        self.transcript()
+        transcript = self.transcript()
         self.script(
             "tmux-agent-resurrect-claude-hook",
             data=json.dumps(
@@ -1588,11 +1599,13 @@ class Integration(unittest.TestCase):
             ),
             env=dict(self.env, CLAUDE_PID=str(process.pid)),
         )
+        launch = json.loads(self.option("@agent-resurrect-launch"))
+        self.assertEqual(launch["options"], expected)
         self.assertEqual(
-            json.loads(self.option("@agent-resurrect-launch"))["options"], expected
+            (launch["model"], launch["effort"]), ("claude-haiku-5-5", "low")
         )
         # Resuming restores the permission mode, except bypassing permissions.
-        with self.transcript().open("a") as stream:
+        with transcript.open("a") as stream:
             for mode in ["plan", "bypassPermissions"]:
                 stream.write(
                     json.dumps({"type": "permission-mode", "permissionMode": mode})
@@ -1600,7 +1613,17 @@ class Integration(unittest.TestCase):
                 )
         self.write_snapshot()
         self.script("tmux-agent-resurrect-save", self.snapshot)
-        expected.append("--dangerously-skip-permissions")
+        # No response in the transcript has a model or effort level.
+        expected += ["--dangerously-skip-permissions", "--model", "claude-haiku-5-5"]
+        expected += ["--effort", "low"]
+        self.assertEqual(self.records()[0]["options"], expected)
+        # A response's model and level replace the ones Claude was started with.
+        with transcript.open("a") as stream:
+            response = {"type": "assistant", "requestedModel": "claude-opus-5-5"}
+            stream.write(json.dumps({**response, "effort": "max"}) + "\n")
+        self.write_snapshot()
+        self.script("tmux-agent-resurrect-save", self.snapshot)
+        expected[-4:] = ["--model", "claude-opus-5-5", "--effort", "max"]
         self.assertEqual(self.records()[0]["options"], expected)
         self.hook("SessionEnd")
         self.attach()
@@ -1608,6 +1631,122 @@ class Integration(unittest.TestCase):
         self.assertEqual(
             self.expect_launches(1)[0]["argv"], ["--resume", ID, *expected]
         )
+
+    def test_save_takes_the_model_and_effort_level_the_session_last_used(self):
+        def response(model, effort, skill=None):
+            entry = {"type": "assistant", "requestedModel": model, "effort": effort}
+            return {**entry, "attributionSkill": skill} if skill else entry
+
+        opus, fable, haiku = "claude-opus-5-5", "claude-fable-5-1", "claude-haiku-5-5"
+        error = {
+            "type": "assistant",
+            "isApiErrorMessage": True,
+            "message": {"model": "<synthetic>"},
+        }
+        typed_effort = {
+            "type": "user",
+            "message": {"content": "<command-name>/effort</command-name>"},
+        }
+        typed_model = {
+            "type": "system",
+            "subtype": "local_command",
+            "content": "<command-name>/model</command-name>",
+        }
+        fallback = {"type": "system", "subtype": "model_fallback"}
+        turn_end = {"type": "system", "subtype": "turn_duration"}
+        ultracode_on = {
+            "type": "attachment",
+            "attachment": {"type": "ultra_effort_enter"},
+        }
+        ultracode_off = {
+            "type": "attachment",
+            "attachment": {"type": "ultra_effort_exit"},
+        }
+        cases = {
+            # Claude records an API error as a response of its own.
+            "latest response": (
+                [response(opus, "max"), response(fable, "xhigh"), error],
+                fable,
+                "xhigh",
+            ),
+            # A skill's own level holds for the rest of its turn.
+            "skill's own level": (
+                [
+                    response(opus, "max"),
+                    response(opus, "low", "s"),
+                    response(opus, "low", "s"),
+                ],
+                opus,
+                "max",
+            ),
+            "skill's own model": (
+                [response(opus, "max"), response(haiku, "max", "s")],
+                opus,
+                "max",
+            ),
+            "changed during a skill": (
+                [
+                    response(opus, "high"),
+                    response(opus, "high", "s"),
+                    response(opus, "max", "s"),
+                ],
+                opus,
+                "max",
+            ),
+            "typed /effort": (
+                [response(opus, "high"), typed_effort, response(opus, "max", "loop")],
+                opus,
+                "max",
+            ),
+            "typed /model": (
+                [response(opus, "high"), typed_model, response(fable, "max", "loop")],
+                fable,
+                "max",
+            ),
+            "fallback in the turn": (
+                [response(opus, "max"), fallback, response(fable, "high")],
+                opus,
+                "max",
+            ),
+            "after the fallback": (
+                [
+                    response(opus, "max"),
+                    fallback,
+                    response(fable, "high"),
+                    turn_end,
+                    response(fable, "xhigh"),
+                ],
+                fable,
+                "xhigh",
+            ),
+            "ultracode": ([ultracode_on, response(opus, "xhigh")], opus, "ultracode"),
+            "ultracode turned off": (
+                [
+                    ultracode_on,
+                    response(opus, "xhigh"),
+                    ultracode_off,
+                    response(opus, "xhigh"),
+                ],
+                opus,
+                "xhigh",
+            ),
+        }
+        for name, (entries, model, effort) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.saved_options(*entries), ["--model", model, "--effort", effort]
+                )
+
+    def test_harness_resume_leaves_the_settings_to_claude(self):
+        self.tmux("set", "-g", "@agent-resurrect-harness-resume", "on")
+        process = self.claude_process("--model", "claude-haiku-5-5", "--effort", "low")
+        options = self.saved_options(
+            {"type": "permission-mode", "permissionMode": "bypassPermissions"},
+            {"type": "assistant", "requestedModel": "claude-opus-5-5", "effort": "max"},
+            {"type": "attachment", "attachment": {"type": "ultra_effort_enter"}},
+            process=process,
+        )
+        self.assertEqual(options, ["--model", "claude-haiku-5-5", "--effort", "low"])
 
     def test_records_without_a_config_dir_use_the_server_one(self):
         # A session whose CLAUDE_CONFIG_DIR was relative has none.

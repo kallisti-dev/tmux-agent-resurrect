@@ -64,14 +64,16 @@ paren_depth() {
 # --resume does not restore. Not repeated are those that choose or create a
 # session, apply only with --print, or set the permission mode, which the
 # resumed session restores, except bypassing permissions; save adds that from
-# the transcript. Relative paths are resolved against base, the directory
-# Claude started in. Stop at the first argument whose meaning is uncertain,
-# such as an unknown option or the prompt, which is not repeated. The options
-# are Claude Code 2.1.300's.
+# the transcript. Set model and effort to the values of --model and --effort
+# rather than repeating them, since save prefers later ones from the
+# transcript. Relative paths are resolved against base, the directory Claude
+# started in. Stop at the first argument whose meaning is uncertain, such as
+# an unknown option or the prompt, which is not repeated. The options are
+# Claude Code 2.1.300's.
 launch_options() {
   local n i=-1 j arg name value kind keep inline path values word test
   word='^[A-Za-z0-9][][A-Za-z0-9._:/@,+=-]*$'
-  options=()
+  options=() model='' effort=''
   [[ ${CLAUDE_PID:-} =~ ^[0-9]+$ ]] || return 0
   read_args "$CLAUDE_PID"
   n=${#process_args[@]}
@@ -143,7 +145,11 @@ launch_options() {
         case $kind in
           word)
             [[ $value =~ $word ]] || return 0
-            options+=("$name" "$value")
+            case $name in
+              --model) model=$value ;;
+              --effort) effort=$value ;;
+              *) options+=("$name" "$value") ;;
+            esac
             ;;
           text) options+=("$name" "$value") ;;
           path)
@@ -234,12 +240,14 @@ case "$event" in
     fi
     base=$(jq -r '.cwd // empty' <<<"$payload")
     [[ $base == /* ]] || base=$PWD
-    launch_options || options=()
+    launch_options || options=() model='' effort=''
     if ((${#options[@]})); then
       # Each holds no newline, as launch_options leaves out control characters.
       repeated=$(printf '%s\n' "${options[@]}" | jq -Rsc 'split("\n")[:-1]')
       launch=$(jq -c --argjson options "$repeated" '. + {options: $options}' <<<"$launch")
     fi
+    launch=$(jq -c --arg model "$model" --arg effort "$effort" \
+      '. + ({model: $model, effort: $effort} | with_entries(select(.value != "")))' <<<"$launch")
     record_session "$TMUX_PANE" claude "$id" '' "$launch"
     # Report a Claude plugin whose version differs from the tmux plugin's: one
     # installed separately, as with the Nix packages, or an earlier copy that
