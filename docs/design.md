@@ -72,8 +72,9 @@ the command line of `CLAUDE_PID`, the Claude process:
   choose or create a session, apply only with `--print`, or set the permission
   mode, which the resumed session restores. Save adds
   `--dangerously-skip-permissions` from the transcript instead. The values of
-  `--model` and `--effort` are kept apart from the options, since save prefers
-  later ones from the transcript.
+  `--model` and `--effort` are kept apart from the options, since save leaves
+  the model to Claude once the session has a response and prefers a later
+  effort level from the transcript.
 - Relative paths are resolved against the directory Claude started in. A
   `--settings` or `--mcp-config` value that isn't a file is JSON, which may
   hold secrets, so it is not repeated.
@@ -131,20 +132,22 @@ A pane that records a session gets a [snapshot record](#snapshot-records):
   report an end, so its session is saved only while the pane still runs
   OpenCode.
 
-`--resume` doesn't restore a Claude session's model or effort level, and
-Claude's settings can't keep max effort as the default. Unless
-`@agent-resurrect-harness-resume` is `on`, save adds the settings the session
-last used to the record's options, from its transcript:
+`--resume` restores the model of a Claude session's latest response, skipping
+API errors, unless `--model` sets one. It doesn't restore the effort level,
+and Claude's settings can't keep max effort as the default. Unless
+`@agent-resurrect-harness-resume` is `on`, save repeats the `--model` Claude
+was started with only if the transcript has no such response, and adds the
+settings the session last used to the record's options, from its transcript:
 
 - `--dangerously-skip-permissions` if the latest permission mode is
   `bypassPermissions`. Claude restores the other modes itself.
-- `--model` and `--effort` with the `requestedModel` and `effort` of the latest
-  response, or else the values Claude was started with. A skill can set its
-  own model or effort level for the rest of its turn, which `/model` and
-  `/effort` don't override, so the responses made in skills since the latest
-  response outside one don't count when they all have one value that differs
-  from that response's, unless a typed `/model` or `/effort` has come since.
-  Responses after a fallback to another model don't count until the turn ends.
+- `--effort` with the `effort` of the latest response, or else the value Claude
+  was started with. A skill can set its own effort level for the rest of its
+  turn, which `/effort` doesn't override, so the responses made in skills
+  since the latest response outside one don't count when they all have one
+  level that differs from that response's, unless a typed `/effort` or
+  `/model` has come since. Responses after a fallback to another model don't
+  count until the turn ends.
 - `--effort ultracode` instead if ultracode was on: Claude adds an
   `ultra_effort_enter` attachment while it is on and an `ultra_effort_exit` one
   when it goes off.

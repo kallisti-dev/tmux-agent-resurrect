@@ -65,7 +65,8 @@ paren_depth() {
 # session, apply only with --print, or set the permission mode, which the
 # resumed session restores, except bypassing permissions; save adds that from
 # the transcript. Set model and effort to the values of --model and --effort
-# rather than repeating them, since save prefers later ones from the
+# rather than repeating them, since save leaves the model to Claude once the
+# session has a response and prefers a later effort level from the
 # transcript. Relative paths are resolved against base, the directory Claude
 # started in. Stop at the first argument whose meaning is uncertain, such as
 # an unknown option or the prompt, which is not repeated. The options are

@@ -17,28 +17,21 @@ harness_resume=$(tmux show-options -gqv @agent-resurrect-harness-resume)
 
 # Usage: read_transcript TRANSCRIPT
 # Print as JSON what save takes from a Claude transcript: the latest valid
-# absolute cwd, the latest permission mode, and the model and effort level
-# that the session last used, as each response records them. A skill can set
-# its own model or effort level for the rest of its turn, which /model and
-# /effort don't override, so the responses since the latest one outside a
-# skill don't count when they all have one value that differs from that
-# one's, unless a typed /model or /effort may have chosen it. Responses after
-# a fallback to another model don't count until the turn ends. Ultracode is on
-# from an enter attachment until an exit one. JSON decoding handles spaces,
-# escaping and pretty/partially written lines.
+# absolute cwd, the latest permission mode, whether a response has a model for
+# Claude to restore, and the effort level that the session last used, as each
+# response records it. A skill can set its own effort level for the rest of
+# its turn, which /effort doesn't override, so the responses since the latest
+# one outside a skill don't count when they all have one level that differs
+# from that one's, unless a typed /effort or /model may have chosen it.
+# Responses after a fallback to another model don't count until the turn ends.
+# Ultracode is on from an enter attachment until an exit one. JSON decoding
+# handles spaces, escaping and pretty/partially written lines.
 read_transcript() {
   jq -cRn '
     def level: if type == "string" and test("^[a-z]+\\z") then . else null end;
-    def word: if type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:/@,+=\\[\\]-]*\\z")
-      then . else null end;
     def get($key): if type == "object" then .[$key] else null end;
     def typed($command): [(.message | get("content")), .content | strings |
       select(startswith("<command-name>/\($command)</command-name>"))] | length > 0;
-    def restored($setting):
-      (.skill[$setting] // []) as $values |
-      if ($values | length) == 1 and .outside[$setting] != null and
-        $values[0] != .outside[$setting] and (.chosen[$setting] | not)
-      then .outside[$setting] else .latest[$setting] end;
     reduce inputs as $line ({};
       (try ($line | fromjson) catch null) as $entry |
       if ($entry | type) != "object" then .
@@ -47,18 +40,16 @@ read_transcript() {
           then .cwd = $entry.cwd else . end) |
         (if ($entry.permissionMode | type) == "string"
           then .mode = $entry.permissionMode else . end) |
+        ($entry.message | get("model")) as $model |
         # Claude records an API error as a response of its own.
-        if $entry.type == "assistant" and ($entry.message | get("model")) != "<synthetic>" and
-          (.fallback | not)
-        then
-          ({effort: ($entry.effort | level), model: ($entry.requestedModel | word)} |
-            with_entries(select(.value != null))) as $used |
-          .latest += $used |
-          if $entry.attributionSkill then
-            .skill.effort = ((.skill.effort // []) + [$used.effort | values] | unique) |
-            .skill.model = ((.skill.model // []) + [$used.model | values] | unique)
+        if $entry.type == "assistant" and ($model | type) == "string" and $model != "<synthetic>" then
+          .responded = true |
+          ($entry.effort | level) as $effort |
+          if .fallback then .
           else
-            .outside += $used | .skill = {} | .chosen = {}
+            .latest = ($effort // .latest) |
+            if $entry.attributionSkill then .skill = ((.skill // []) + [$effort | values] | unique)
+            else .outside = ($effort // .outside) | .skill = [] | .chosen = false end
           end
         elif $entry.type == "attachment" and ($entry.attachment | get("type")) == "ultra_effort_enter" then
           .ultracode = true
@@ -67,12 +58,13 @@ read_transcript() {
         elif $entry.type == "system" and $entry.subtype == "model_fallback" then .fallback = true
         elif $entry.type == "system" and $entry.subtype == "turn_duration" then .fallback = false
         # The model picker sets the effort level too.
-        elif $entry | typed("model") then .chosen = {model: true, effort: true}
-        elif $entry | typed("effort") then .chosen.effort = true
+        elif $entry | typed("effort") or typed("model") then .chosen = true
         else . end
       end) |
-    {cwd, mode, model: restored("model"),
-      effort: (if .ultracode then "ultracode" else restored("effort") end)}
+    {cwd, mode, responded,
+      effort: (if .ultracode then "ultracode"
+        elif (.skill | length) == 1 and .outside != null and .skill[0] != .outside and (.chosen | not)
+        then .outside else .latest end)}
   ' "$1"
 }
 
@@ -127,13 +119,14 @@ while IFS=$'\t' read -r command full row; do
       last_cwd=$(jq -r '.cwd // empty' <<<"$used")
       [[ -z $last_cwd ]] || dir=$last_cwd
       # Resuming restores the permission mode, except bypassing permissions,
-      # but not the model or effort level, and Claude's settings can't keep
-      # max effort as the default.
+      # and the model of the latest response unless --model sets one. It
+      # doesn't restore the effort level, and Claude's settings can't keep max
+      # effort as the default.
       if [[ $harness_resume != on ]]; then
         if [[ $(jq -r '.mode // empty' <<<"$used") == bypassPermissions ]]; then
           launch=$(jq -c '.options = ((.options // []) + ["--dangerously-skip-permissions"])' <<<"$launch")
         fi
-        model=$(jq -r --arg model "$model" '.model // $model' <<<"$used")
+        [[ $(jq -r '.responded' <<<"$used") != true ]] || model=''
         effort=$(jq -r --arg effort "$effort" '.effort // $effort' <<<"$used")
       fi
     else

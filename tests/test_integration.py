@@ -1611,19 +1611,22 @@ class Integration(unittest.TestCase):
                     json.dumps({"type": "permission-mode", "permissionMode": mode})
                     + "\n"
                 )
+            error = {"type": "assistant", "message": {"model": "<synthetic>"}}
+            stream.write(json.dumps(error) + "\n")
         self.write_snapshot()
         self.script("tmux-agent-resurrect-save", self.snapshot)
         # No response in the transcript has a model or effort level.
         expected += ["--dangerously-skip-permissions", "--model", "claude-haiku-5-5"]
         expected += ["--effort", "low"]
         self.assertEqual(self.records()[0]["options"], expected)
-        # A response's model and level replace the ones Claude was started with.
+        # Resuming restores the model of a response, whose level replaces the one
+        # Claude was started with.
         with transcript.open("a") as stream:
-            response = {"type": "assistant", "requestedModel": "claude-opus-5-5"}
+            response = {"type": "assistant", "message": {"model": "claude-opus-5-5"}}
             stream.write(json.dumps({**response, "effort": "max"}) + "\n")
         self.write_snapshot()
         self.script("tmux-agent-resurrect-save", self.snapshot)
-        expected[-4:] = ["--model", "claude-opus-5-5", "--effort", "max"]
+        expected[-4:] = ["--effort", "max"]
         self.assertEqual(self.records()[0]["options"], expected)
         self.hook("SessionEnd")
         self.attach()
@@ -1632,12 +1635,12 @@ class Integration(unittest.TestCase):
             self.expect_launches(1)[0]["argv"], ["--resume", ID, *expected]
         )
 
-    def test_save_takes_the_model_and_effort_level_the_session_last_used(self):
-        def response(model, effort, skill=None):
-            entry = {"type": "assistant", "requestedModel": model, "effort": effort}
+    def test_save_takes_the_effort_level_the_session_last_used(self):
+        def response(effort, skill=None):
+            message = {"model": "claude-opus-5-5"}
+            entry = {"type": "assistant", "message": message, "effort": effort}
             return {**entry, "attributionSkill": skill} if skill else entry
 
-        opus, fable, haiku = "claude-opus-5-5", "claude-fable-5-1", "claude-haiku-5-5"
         error = {
             "type": "assistant",
             "isApiErrorMessage": True,
@@ -1664,85 +1667,58 @@ class Integration(unittest.TestCase):
         }
         cases = {
             # Claude records an API error as a response of its own.
-            "latest response": (
-                [response(opus, "max"), response(fable, "xhigh"), error],
-                fable,
-                "xhigh",
-            ),
+            "latest response": ([response("max"), response("xhigh"), error], "xhigh"),
             # A skill's own level holds for the rest of its turn.
             "skill's own level": (
-                [
-                    response(opus, "max"),
-                    response(opus, "low", "s"),
-                    response(opus, "low", "s"),
-                ],
-                opus,
-                "max",
-            ),
-            "skill's own model": (
-                [response(opus, "max"), response(haiku, "max", "s")],
-                opus,
+                [response("max"), response("low", "s"), response("low", "s")],
                 "max",
             ),
             "changed during a skill": (
-                [
-                    response(opus, "high"),
-                    response(opus, "high", "s"),
-                    response(opus, "max", "s"),
-                ],
-                opus,
+                [response("high"), response("high", "s"), response("max", "s")],
                 "max",
             ),
             "typed /effort": (
-                [response(opus, "high"), typed_effort, response(opus, "max", "loop")],
-                opus,
+                [response("high"), typed_effort, response("max", "loop")],
                 "max",
             ),
             "typed /model": (
-                [response(opus, "high"), typed_model, response(fable, "max", "loop")],
-                fable,
+                [response("high"), typed_model, response("max", "loop")],
                 "max",
             ),
             "fallback in the turn": (
-                [response(opus, "max"), fallback, response(fable, "high")],
-                opus,
+                [response("max"), fallback, response("high")],
                 "max",
             ),
             "after the fallback": (
                 [
-                    response(opus, "max"),
+                    response("max"),
                     fallback,
-                    response(fable, "high"),
+                    response("high"),
                     turn_end,
-                    response(fable, "xhigh"),
+                    response("xhigh"),
                 ],
-                fable,
                 "xhigh",
             ),
-            "ultracode": ([ultracode_on, response(opus, "xhigh")], opus, "ultracode"),
+            "ultracode": ([ultracode_on, response("xhigh")], "ultracode"),
             "ultracode turned off": (
-                [
-                    ultracode_on,
-                    response(opus, "xhigh"),
-                    ultracode_off,
-                    response(opus, "xhigh"),
-                ],
-                opus,
+                [ultracode_on, response("xhigh"), ultracode_off, response("xhigh")],
                 "xhigh",
             ),
         }
-        for name, (entries, model, effort) in cases.items():
+        for name, (entries, effort) in cases.items():
             with self.subTest(name):
-                self.assertEqual(
-                    self.saved_options(*entries), ["--model", model, "--effort", effort]
-                )
+                self.assertEqual(self.saved_options(*entries), ["--effort", effort])
 
     def test_harness_resume_leaves_the_settings_to_claude(self):
         self.tmux("set", "-g", "@agent-resurrect-harness-resume", "on")
         process = self.claude_process("--model", "claude-haiku-5-5", "--effort", "low")
         options = self.saved_options(
             {"type": "permission-mode", "permissionMode": "bypassPermissions"},
-            {"type": "assistant", "requestedModel": "claude-opus-5-5", "effort": "max"},
+            {
+                "type": "assistant",
+                "message": {"model": "claude-opus-5-5"},
+                "effort": "max",
+            },
             {"type": "attachment", "attachment": {"type": "ultra_effort_enter"}},
             process=process,
         )

@@ -296,15 +296,16 @@ lists, but not the prompt. On macOS, the options are read from `ps`, which
 joins arguments with spaces, so options after a system prompt, or after another
 value with spaces that isn't an existing path, are not repeated.
 
-Resuming doesn't restore the model or effort level either, so a resumed session
-would get the default ones, and the default level can't be max. The command
-passes the model and effort level the session last used with `--model` and
-`--effort`, leaving out those a skill sets for its own turn, and
-`--effort ultracode` if ultracode was on. When the transcript doesn't record
-them, it repeats the ones Claude was started with. Claude restores the
-permission mode itself, except bypassing permissions, so the command adds
-`--dangerously-skip-permissions` if the session last bypassed them.
-[Harness resume](#harness-resume) turns these off.
+Resuming restores the model of the session's latest response, so the command
+repeats `--model` only for a session with no response yet. It doesn't restore
+the effort level, so a resumed session would get the default one, which can't
+be max. The command passes the level the session last used with `--effort`,
+leaving out one a skill sets for its own turn, or `--effort ultracode` if
+ultracode was on. When the transcript doesn't record one, it repeats the level
+Claude was started with. Claude restores the permission mode itself, except
+bypassing permissions, so the command adds `--dangerously-skip-permissions` if
+the session last bypassed them. [Harness resume](#harness-resume) turns these
+off.
 
 ### OpenCode
 
@@ -344,8 +345,8 @@ environment, where the save and restore callbacks run.
 ### Harness resume
 
 By default, a Claude session resumes with the model, effort level, ultracode,
-and permission bypass it last used, which `--resume` doesn't restore. To resume
-sessions as Claude does, with only the options they were started with, set:
+and permission bypass it last used. To resume sessions as Claude does, with
+only the options they were started with, set:
 
 ```tmux
 set -g @agent-resurrect-harness-resume 'on'
