@@ -1862,7 +1862,9 @@ class Integration(unittest.TestCase):
             )
             return result.stdout.strip()
 
-        session = wait_until(recorded, "Claude did not record its session", 30)
+        session = self.wait_for_agent(
+            pane, recorded, "Claude did not record its session"
+        )
         self.assertRegex(session, r"^claude [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
         self.tmux("set", "-g", "@resurrect-save-script-path", "/resurrect/save.sh")
         result = self.script(
@@ -1880,7 +1882,9 @@ class Integration(unittest.TestCase):
         self.assertTrue(result.stdout.endswith("No problems found.\n"))
         # Interrupting Claude ends its session while the pane stays open.
         self.tmux("send-keys", "-t", pane, "C-c")
-        wait_until(lambda: not recorded(), "Claude did not clear its session", 30)
+        self.wait_for_agent(
+            pane, lambda: not recorded(), "Claude did not clear its session"
+        )
         self.wait_for_exit(pane, "claude")
 
     def configure_opencode(self):
@@ -1923,9 +1927,11 @@ class Integration(unittest.TestCase):
         return config
 
     def open_opencode(self, binary, *args, name="opencode"):
-        # The check asks Claude for its version and plugins.
+        # The check asks Claude for its version and plugins. After OpenCode
+        # exits, the pane stays open for longer than the test prompts it, so
+        # a failure shows what OpenCode printed.
         path = shlex.quote(self.fake_claude()["PATH"])
-        command = f"PATH={path} {shlex.join([binary, *args])}; sleep 60"
+        command = f"PATH={path} {shlex.join([binary, *args])}; sleep 120"
         self.tmux("new-window", "-d", "-n", name, "-c", str(self.cwd), command)
         pane = self.tmux("display", "-p", "-t", f"work:{name}", "#{pane_id}")
         return pane.stdout.strip()
@@ -1950,7 +1956,7 @@ class Integration(unittest.TestCase):
             except AssertionError:
                 continue
         else:
-            self.fail("OpenCode did not record its session")
+            raise self.agent_failure(pane, "OpenCode did not record its session")
         self.assertRegex(session, r"^opencode ses_[0-9A-Za-z]+$")
         cwd = self.option("@agent-resurrect-cwd", pane)
         self.assertTrue(cwd.startswith("/"), cwd)
@@ -1969,10 +1975,10 @@ class Integration(unittest.TestCase):
             time.sleep(1)
             self.tmux("send-keys", "-t", pane, "Enter")
         line = f"this pane records session {session.split()[1]}"
-        wait_until(
+        self.wait_for_agent(
+            pane,
             lambda: line in self.tmux("capture-pane", "-p", "-t", pane).stdout,
             "OpenCode did not show the check",
-            30,
         )
 
     def quit_opencode(self, pane):
@@ -1981,8 +1987,8 @@ class Integration(unittest.TestCase):
         for key in ["Escape", "Escape", "C-c"]:
             self.tmux("send-keys", "-t", pane, key)
             time.sleep(0.5)
-        wait_until(
-            lambda: not self.recorded(pane), "OpenCode did not clear its session", 30
+        self.wait_for_agent(
+            pane, lambda: not self.recorded(pane), "OpenCode did not clear its session"
         )
         self.wait_for_exit(pane, "opencode")
 
@@ -2019,10 +2025,10 @@ class Integration(unittest.TestCase):
         self.quit_opencode(pane)
         # OpenCode records a session it opens, without a prompt.
         pane = self.open_opencode(OPENCODE_2, "-s", session.split()[1], name="resumed")
-        wait_until(
+        self.wait_for_agent(
+            pane,
             lambda: self.recorded(pane) == session,
             "OpenCode did not record the session it opened",
-            30,
         )
         self.quit_opencode(pane)
 
@@ -2044,7 +2050,17 @@ class Integration(unittest.TestCase):
             command = self.tmux("display", "-p", "-t", pane, "#{pane_current_command}")
             return re.search(rf"(^|/)\.?{agent}($|[-. ])", command.stdout.strip())
 
-        wait_until(lambda: not running(), f"{agent} did not exit", 30)
+        self.wait_for_agent(pane, lambda: not running(), f"{agent} did not exit")
+
+    def wait_for_agent(self, pane, predicate, message):
+        try:
+            return wait_until(predicate, message, 30)
+        except AssertionError:
+            raise self.agent_failure(pane, message) from None
+
+    def agent_failure(self, pane, message):
+        screen = self.tmux("capture-pane", "-p", "-t", pane, check=False).stdout
+        return AssertionError(f"{message}. The pane shows:\n{screen.rstrip()}")
 
     def install_tpm(self, plugins=None):
         # TPM and resurrect, where the README's configuration loads them, or
